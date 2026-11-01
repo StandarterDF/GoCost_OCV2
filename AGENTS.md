@@ -2,26 +2,39 @@
 
 ## Назначение
 
-TUI-плагин OpenCode V2, который добавляет в футер сессии оценку стоимости для
-провайдера **OpenCode Go** (`opencode-go`). В OpenCode 2.2.5 такие сессии
+TUI-плагин OpenCode V2, который показывает в футере сессии оценку стоимости
+для провайдера **OpenCode Go** (`opencode-go`). В OpenCode 2.2.5 такие сессии
 приходят с `session.cost = 0`, а встроенный футер рисует стоимость только при
 `session.cost > 0`. Плагин считает сумму по токенам сессии и ценам каталога
-моделей и дописывает метку `≈$0.12` в `prompt.footer.status`.
+моделей и подменяет общий метод `context.data.session.cost`, поэтому оценка
+встаёт на место встроенной стоимости — сразу после счётчика токенов:
 
-Плагин ничего не заменяет и не отключает: встроенная часть футера остаётся на
-месте, метка добавляется в конец. Сеть не используется.
+```
+470.3K (48%) · $0.17
+```
+
+Формат — родной для OpenCode (`Intl.NumberFormat`, `style: "currency"`,
+`currency: "USD"`), без префикса `≈` и без второй метки. Тот же метод читает
+встроенный компонент Context в боковой панели, поэтому «spent» там тоже
+показывает оценку. Сеть не используется.
+
+Если объект данных заморожен и метод не перезаписывается, плагин
+откатывается на прежнее поведение: метка `≈$0.12` в `prompt.footer.status` и
+диалог с расшифровкой по клику.
 
 ## Файлы
 
 | Файл | Роль |
 |---|---|
-| `plugin/tui.tsx` | TUI-плагин. `Plugin.define({ id, setup })`, слот `prompt.footer.status`, диалог по клику. |
+| `plugin/tui.tsx` | TUI-плагин. `Plugin.define({ id, setup })`: ставит подмену `session.cost`, возвращает cleanup. Fallback — слот `prompt.footer.status` и диалог по клику. |
+| `plugin/patch.js` | Подмена общего метода стоимости: `installCostOverride(data, estimateSessionCost)` → restore или `undefined`. Без импортов OpenCode. |
 | `plugin/cost.js` | Чистая логика: `pickCostTier`, `estimateCost`, `hasPricing`, `formatCost`, `estimateSessionCost`, `tokensTotal`. Без импортов OpenCode. |
 | `plugin/index.js` | Серверная заглушка: чтобы каталог был корректным пакетом и был виден в `opencode plugin list`. Ничего не делает. |
 | `plugin/package.json` | `"type": "module"`, `main: index.js`, `exports` (`.`, `./tui`). |
 | `opencode.json` | Проектный конфиг (только `$schema`). |
 | `install.bat` | Копирует `plugin/` в глобальный каталог плагинов (Windows), учитывает `XDG_CONFIG_HOME`. |
 | `tmp/test-cost.mjs` | Юнит-тесты `cost.js` на Node (`node tmp/test-cost.mjs`). |
+| `tmp/test-patch.mjs` | Юнит-тесты `patch.js` на моке общего data layer (`node tmp/test-patch.mjs`). |
 | `README.md` | Описание, установка, формула, проверка, ограничения. |
 | `CHANGES.md` | История версий. |
 | `AGENTS.md` | Этот файл. |
@@ -35,6 +48,9 @@ TUI-плагин OpenCode V2, который добавляет в футер с
 export default Plugin.define({
   id: "opencode.go-cost",
   setup(context) {
+    const restore = installCostOverride(context.data, estimateSessionCost)
+    if (typeof restore === "function") return restore
+
     context.ui.slot({
       append: "prompt.footer.status",
       render: (input) => <GoCost context={context} sessionID={input.sessionID} />,
@@ -42,6 +58,10 @@ export default Plugin.define({
   },
 })
 ```
+
+В обычном пути `setup` ничего не регистрирует: он только подменяет метод на
+общем объекте данных и возвращает функцию восстановления (cleanup). Слот
+создаётся лишь в fallback-ветке.
 
 OpenCode (TUI) загружает `./tui` из каталога плагина. Для локального каталога
 `Host.resolve` ищет файл `<dir>/tui` с расширениями `.ts/.tsx/.js/.jsx/...`,
@@ -61,22 +81,39 @@ list`; вся логика находится в TUI-части.
 
 ## Поток данных
 
-1. `setup(context)` регистрирует слот `prompt.footer.status` с
-   `append`, поэтому метка рисуется после встроенного содержимого.
-2. `GoCost` реактивно читает выбранную сессию:
-   `context.data.session.get(props.sessionID)` возвращает
-   `SessionInfo | undefined`.
-3. Второй `createMemo` читает каталог для локации сессии:
-   `context.data.location.model.list(session.location) ?? []`. Оба мемо
-   реактивны: смена модели, локации или сессии обновляет метку без перезапуска.
-4. Третий `createMemo` вызывает
-   `estimateSessionCost(session, models)` из `cost.js`.
-5. `<Show when={estimate() !== undefined}>` не рендерит ничего, если условий
-   нет. Иначе рисуется компактный `box` с текстом `≈$0.12`; весь `box`
-   кликабелен.
-6. Клик вызывает `context.ui.dialog.alert` с расшифровкой: модель, токены,
-   выбранный тариф, цены за 1M и итоговая оценка. Ошибка диалога не ломает
-   футер.
+1. `setup(context)` вызывает
+   `installCostOverride(context.data, estimateSessionCost)`.
+2. `installCostOverride` (`patch.js`) проверяет `data.session`,
+   `session.cost` и `session.get`, сохраняет `original = session.cost` и
+   присваивает `session.cost = patched`. Если присваивание бросило исключение
+   или `session.cost !== patched` (замороженный или неперезаписываемый
+   объект), возвращается `undefined` — тогда `setup` включает fallback.
+3. Все TUI-плагины получают один и тот же `context.data` (`data: r.data` в
+   фабрике контекста). Поэтому `patched` видят и встроенный футер
+   (`opencode.prompt.footer`, он рендерит `usage.join(" · ")`), и встроенный
+   компонент Context в боковой панели.
+4. `patched(sessionID)` сначала вызывает `original.call(session, sessionID)`.
+   Положительное конечное значение возвращается без изменений. Иначе:
+   - `info = session.get(sessionID)`; если сессии нет — вернуть `base` (0);
+   - для субагента (`info.parentID`) список — `[sessionID]`, для корневой
+     сессии — `unique([sessionID, ...session.family(sessionID)])` (нативный
+     метод тоже суммирует семейство);
+   - для каждого id: `item = session.get(id)`,
+     `models = data.location?.model?.list?.(item.location) ?? []`,
+     `estimateSessionCost(item, models)`; `{ amount }` прибавляется к сумме,
+     битые записи пропускаются;
+   - вернуть `total > 0 ? total : base`.
+5. Ошибки внутри `patched` не пробрасываются: сломанный `session.get`,
+   отсутствующий каталог или бросающий оценщик дают нативное значение.
+6. `setup` возвращает `restore`; при выгрузке плагина он присваивает
+   `original` обратно, но только если `session.cost === patched` (чужую
+   подмену не затирает).
+7. Fallback (только если `installCostOverride` вернул `undefined`): слот
+   `prompt.footer.status` с `append`. `GoCost` реактивно читает
+   `context.data.session.get(props.sessionID)` и каталог
+   `context.data.location.model.list(session.location) ?? []`, вызывает
+   `estimateSessionCost` и рисует `≈$0.12`; клик открывает
+   `context.ui.dialog.alert` с моделью, токенами, тарифом, ценами и итогом.
 
 ## Формула (`plugin/cost.js`)
 
@@ -115,14 +152,18 @@ amount = (
 
 ### Формат
 
-`formatCost(value)` отдаёт сумму без `≈`: `$0.00`, `<$0.01` для положительных
-значений меньше цента, иначе `Intl.NumberFormat("en-US", …)` с двумя знаками
-(`$0.12`, `$1,234.50`). Префикс `≈` добавляет UI, чтобы тесты проверяли
-чистые суммы.
+В обычном пути `patched` возвращает число, а форматирует его встроенный футер:
+`Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })` →
+`$0.17`, `$1,234.50`, без `≈`.
+
+`formatCost(value)` используется fallback-меткой и диалогом: `$0.00`,
+`<$0.01` для положительных значений меньше цента, иначе тот же
+`Intl.NumberFormat` с двумя знаками. Префикс `≈` добавляет только fallback-UI,
+чтобы тесты проверяли чистые суммы.
 
 ## Условия показа (`estimateSessionCost`)
 
-Метка строится, только если одновременно выполнено всё:
+Оценка строится, только если одновременно выполнено всё:
 
 1. `session` — объект;
 2. `session.model.providerID === "opencode-go"`;
@@ -136,36 +177,43 @@ amount = (
 
 Возвращает `{ amount, model }` или `undefined`.
 
+`patched` вызывает оценщик только после того, как нативная стоимость
+оказалась нулевой, и складывает результат по сессии и её семейству.
+
 ## Константы
 
 | Константа | Значение | Смысл |
 |---|---|---|
 | `OPENCODE_GO_PROVIDER` (`cost.js`) | `"opencode-go"` | Провайдер, для которого работает плагин. |
 | `TOKENS_PER_MILLION` (`cost.js`) | `1_000_000` | Цены каталога заданы за 1M токенов. |
-| `TITLE` (`tui.tsx`) | `"OpenCode Go: стоимость сессии"` | Заголовок диалога. |
+| `TITLE` (`tui.tsx`) | `"OpenCode Go: стоимость сессии"` | Заголовок fallback-диалога. |
 
 ## Внешние зависимости
 
 Нет. TUI-плагин импортирует `@opencode/plugin/tui` и `solid-js` — их
-резолвит рантайм OpenCode. `cost.js` не импортирует ничего. Сеть не
-используется.
+резолвит рантайм OpenCode. `cost.js` и `patch.js` не импортируют ничего.
+Сеть не используется.
 
 ## Архитектурные ограничения
 
 - Сумма — **оценка по каталогу**, а не счёт провайдера. Скидки и изменения
   цен могут расходиться с фактической оплатой.
-- Плагин намеренно молчит при `session.cost > 0`: встроенный футер уже
-  показывает стоимость, дублировать её нельзя.
-- Поддерживается только `opencode-go`; для других провайдеров метка не
-  рисуется.
+- При `session.cost > 0` возвращается нативное значение: оценка не
+  подмешивается и встроенный счётчик не искажается.
+- Поддерживается только `opencode-go`; для других провайдеров `patched`
+  возвращает ноль или нативную стоимость.
+- Подмена завязана на то, что `context.data.session.cost` — обычное
+  записываемое свойство. Если OpenCode заморозит объект данных или
+  переименует метод, сработает fallback-метка.
 - Если модель отсутствует в каталоге, все цены нулевые или токенов нет,
-  метки нет.
+  стоимость остаётся нулевой.
 - Токены берутся из `session.tokens` — это сумма по всей сессии. Если в
   сессии переключали модели, оценка использует цены текущей модели и потому
   приблизительна.
 - Формула и правило tier завязаны на поведение OpenCode 2.2.5. При изменении
-  API (`session.get`, `location.model.list`, `ModelCost`) файлы `tui.tsx` и
-  `cost.js` нужно обновить.
-- `dialog.alert` — простой текстовый диалог; richer UI не используется.
+  API (`session.get`, `session.family`, `location.model.list`, `ModelCost`)
+  файлы `tui.tsx`, `patch.js` и `cost.js` нужно обновить.
+- `dialog.alert` — простой текстовый диалог fallback-режима; richer UI не
+  используется.
 - `tui.tsx` проверяется сборкой esbuild и рантаймом OpenCode; отдельного шага
   сборки в репозитории нет.

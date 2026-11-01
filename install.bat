@@ -7,7 +7,8 @@ rem   %USERPROFILE%\.config\opencode\plugins\go-cost\
 rem Это каталог глобальных плагинов OpenCode V2 (и серверных, и TUI).
 rem Если задан XDG_CONFIG_HOME, он используется вместо %USERPROFILE%\.config.
 rem
-rem Плагин только добавляет метку в футер. Конфиги (cli.json, opencode.json)
+rem Плагин подменяет общий метод context.data.session.cost, поэтому оценка
+rem появляется на месте встроенной стоимости. Конфиги (cli.json, opencode.json)
 rem не меняются.
 
 set "SRC=%~dp0plugin"
@@ -23,7 +24,7 @@ if not exist "%SRC%\tui.tsx" (
 
 if not exist "%DST%" mkdir "%DST%"
 
-for %%F in (index.js cost.js tui.tsx package.json) do (
+for %%F in (index.js cost.js patch.js tui.tsx package.json) do (
   if exist "%SRC%\%%F" xcopy "%SRC%\%%F" "%DST%\" /Y >nul
 )
 
@@ -35,8 +36,8 @@ echo.
 echo После установки перезапусти сервис: opencode service restart
 echo и заново открой OpenCode (TUI подхватывает плагин при запуске).
 echo.
-echo Проверка: в сессии OpenCode Go с ненулевыми токенами в футере
-echo появится оценка вида "≈$0.12". Клик по ней открывает расшифровку.
+echo Проверка: в сессии OpenCode Go с ненулевыми токенами стоимость появится
+echo на месте встроенной, рядом со счётчиком токенов: "470.3K (48%) · $0.17".
 echo.
 
 pause
