@@ -1,0 +1,13 @@
+# Локальные артефакты
+tmp/*
+!tmp/test-cost.mjs
+
+# Node
+node_modules/
+
+# Логи и бэкапы
+*.log
+*.bak
+
+# Редакторы
+.vscode/
