@@ -90,3 +90,10 @@ export function resetLabel(resetsAt, now = Date.now()) {
   if (value === "—") return "Reset unknown"
   return `Resets in ${value}`
 }
+
+// Compact summary shown in the heading while the panel is collapsed.
+export function usageSummary(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return ""
+  const max = Math.max(...rows.map((row) => meterPercent(row.meter)))
+  return `max ${max}%`
+}

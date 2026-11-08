@@ -42,7 +42,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { estimateSessionCost, formatCost, pickCostTier } from "./cost.js"
 import { installCostOverride } from "./patch.js"
-import { BAR_WIDTH, barFill, meterPercent, meterTone, resetLabel, usageRows } from "./usage.js"
+import { BAR_WIDTH, barFill, meterPercent, meterTone, resetLabel, usageRows, usageSummary } from "./usage.js"
 
 const TITLE = "OpenCode Go: стоимость сессии"
 const PANEL_TITLE = "OpenCode Go"
@@ -197,6 +197,17 @@ function GoUsage(props) {
   })
 
   const rows = createMemo(() => usageRows(lastInfo()))
+  const summary = createMemo(() => usageSummary(rows()))
+
+  // Persisted disclosure state, same pattern as MCPClassify: undefined means
+  // open, false means collapsed.
+  const [view, updateView] = context.storage.store("usage", { initial: {} })
+  const isOpen = () => view.open !== false
+  const toggle = () => {
+    void updateView((draft) => {
+      draft.open = !isOpen()
+    }).catch(() => undefined)
+  }
 
   const load = (fresh) => {
     const target = location()
@@ -228,43 +239,55 @@ function GoUsage(props) {
   return (
     <Show when={rows().length > 0}>
       <box flexDirection="column" gap={1}>
-        <box flexDirection="row" gap={1} minWidth={0} onMouseUp={() => load(true)}>
-          <text fg={theme.text.base} wrapMode="none">
-            <b>{PANEL_TITLE}</b>
-          </text>
+        <box flexDirection="row" gap={1} minWidth={0}>
+          <box flexDirection="row" gap={1} minWidth={0} onMouseDown={toggle}>
+            <text fg={theme.text.base} wrapMode="none">
+              {isOpen() ? "▼" : "▶"}
+            </text>
+            <text fg={theme.text.base} wrapMode="none" truncate flexShrink={1} minWidth={0}>
+              <b>{PANEL_TITLE}</b>
+            </text>
+            <Show when={!isOpen()}>
+              <text fg={theme.text.muted} wrapMode="none" flexShrink={0}>
+                {`(${summary()})`}
+              </text>
+            </Show>
+          </box>
           <box flexGrow={1} />
-          <text fg={theme.text.muted} wrapMode="none">
+          <text fg={theme.text.muted} wrapMode="none" onMouseUp={() => load(true)}>
             ↻
           </text>
         </box>
-        <For each={rows()}>
-          {(row) => {
-            const percent = () => meterPercent(row.meter)
-            const filled = () => barFill(row.meter, BAR_WIDTH)
-            const empty = () => Math.max(0, BAR_WIDTH - filled())
-            const tone = () => toneColor(theme, row.meter)
-            return (
-              <box flexDirection="column" minWidth={0}>
-                <box flexDirection="row" gap={1} minWidth={0}>
-                  <text fg={theme.text.base} wrapMode="none" truncate flexShrink={1} minWidth={0}>
-                    <b>{row.label}</b>
-                  </text>
-                  <text fg={tone()} wrapMode="none" flexShrink={0}>
-                    <b>{`${percent()}% used`}</b>
-                  </text>
-                  <box flexGrow={1} />
-                  <text fg={theme.text.muted} wrapMode="none" flexShrink={0}>
-                    {resetLabel(row.meter?.resetsAt, now())}
+        <Show when={isOpen()}>
+          <For each={rows()}>
+            {(row) => {
+              const percent = () => meterPercent(row.meter)
+              const filled = () => barFill(row.meter, BAR_WIDTH)
+              const empty = () => Math.max(0, BAR_WIDTH - filled())
+              const tone = () => toneColor(theme, row.meter)
+              return (
+                <box flexDirection="column" minWidth={0}>
+                  <box flexDirection="row" gap={1} minWidth={0}>
+                    <text fg={theme.text.base} wrapMode="none" truncate flexShrink={1} minWidth={0}>
+                      <b>{row.label}</b>
+                    </text>
+                    <text fg={tone()} wrapMode="none" flexShrink={0}>
+                      <b>{`${percent()}% used`}</b>
+                    </text>
+                    <box flexGrow={1} />
+                    <text fg={theme.text.muted} wrapMode="none" flexShrink={0}>
+                      {resetLabel(row.meter?.resetsAt, now())}
+                    </text>
+                  </box>
+                  <text wrapMode="none">
+                    <span style={{ fg: tone() }}>{FILLED.repeat(filled())}</span>
+                    <span style={{ fg: theme.text.muted }}>{TRACK.repeat(empty())}</span>
                   </text>
                 </box>
-                <text wrapMode="none">
-                  <span style={{ fg: tone() }}>{FILLED.repeat(filled())}</span>
-                  <span style={{ fg: theme.text.muted }}>{TRACK.repeat(empty())}</span>
-                </text>
-              </box>
-            )
-          }}
-        </For>
+              )
+            }}
+          </For>
+        </Show>
       </box>
     </Show>
   )

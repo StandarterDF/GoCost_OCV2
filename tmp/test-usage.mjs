@@ -8,6 +8,7 @@ import {
   meterTone,
   resetLabel,
   usageRows,
+  usageSummary,
 } from "../plugin/usage.js"
 
 const NOW = Date.UTC(2026, 10, 8, 12, 0, 0)
@@ -75,5 +76,14 @@ assert.deepEqual(
 )
 assert.deepEqual(usageRows({}), [])
 assert.deepEqual(usageRows(null), [])
+
+// Collapsed heading summary.
+assert.equal(usageSummary([]), "")
+assert.equal(usageSummary(null), "")
+assert.equal(
+  usageSummary(usageRows({ go: { rolling: { percent: 1 }, weekly: { percent: 49 }, monthly: { percent: 32 } } })),
+  "max 49%",
+)
+assert.equal(usageSummary(usageRows({ go: { rolling: { percent: 91 } } })), "max 91%")
 
 console.log("usage.js: ok")

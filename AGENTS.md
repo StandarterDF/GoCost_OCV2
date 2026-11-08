@@ -35,7 +35,7 @@ TUI-плагин OpenCode V2, который показывает в футер�
 | `plugin/tui.tsx` | TUI-плагин. `Plugin.define({ id, setup })`: слот `sidebar.content` с лимитами Go, подмена `session.cost`, cleanup. Fallback — слот `prompt.footer.status` и диалог по клику. |
 | `plugin/patch.js` | Подмена общего метода стоимости: `installCostOverride(data, estimateSessionCost)` → restore или `undefined`. Без импортов OpenCode. |
 | `plugin/cost.js` | Чистая логика: `pickCostTier`, `estimateCost`, `hasPricing`, `formatCost`, `estimateSessionCost`, `tokensTotal`. Без импортов OpenCode. |
-| `plugin/usage.js` | Чистая логика панели лимитов: `USAGE_WINDOWS`, `meterPercent`, `meterTone`, `barFill`, `formatReset`, `resetLabel`, `usageRows`, `BAR_WIDTH`. Без импортов OpenCode. |
+| `plugin/usage.js` | Чистая логика панели лимитов: `USAGE_WINDOWS`, `meterPercent`, `meterTone`, `barFill`, `formatReset`, `resetLabel`, `usageRows`, `usageSummary`, `BAR_WIDTH`. Без импортов OpenCode. |
 | `plugin/index.js` | Серверная заглушка: чтобы каталог был корректным пакетом и был виден в `opencode plugin list`. Ничего не делает. |
 | `plugin/package.json` | `"type": "module"`, `main: index.js`, `exports` (`.`, `./tui`). |
 | `opencode.json` | Проектный конфиг (только `$schema`). |
@@ -148,11 +148,16 @@ list`; вся логика находится в TUI-части.
    `session.execution.succeeded` для этой сессии и по клику на заголовок.
 6. Локальные часы (`setInterval`, 30 с) обновляют только обратный отсчёт;
    проценты приходят из кэша.
-7. Отрисовка: заголовок `OpenCode Go` и `↻`, затем по два ряда на окно —
+7. Сворачивание: `context.storage.store("usage", { initial: {} })`,
+   `view.open !== false` — открыто. Клик по заголовку переключает `▼` / `▶`
+   и пишет состояние в storage; в свёрнутом виде справа от заголовка
+   показывается `usageSummary(rows())` → `(max N%)`.
+8. Отрисовка: заголовок `▼ OpenCode Go` (в свёрнутом виде `▶ OpenCode Go
+   (max N%)`) и `↻`, затем по два ряда на окно —
    `label · N% used · Resets in <countdown>` и полоса из `█` / `░`.
    `BAR_WIDTH = 36` рассчитан на боковую панель шириной 42 колонки с
    двусторонним отступом 2.
-8. Цвет: акцент темы (`theme.text.action.primary.$selected`) до 74 %,
+9. Цвет: акцент темы (`theme.text.action.primary.$selected`) до 74 %,
    `warning` с 75 %, `error` с 90 % или при `meter.limited === true`. Именно
    акцент, а не `feedback.success`: в теме `orng` success специально синий.
 
