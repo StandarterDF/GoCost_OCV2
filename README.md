@@ -39,14 +39,44 @@ OpenCode Go счётчика стоимости просто нет.
   значение возвращается как есть;
 - если объект данных заморожен и метод не перезаписывается, откатывается на
   старую метку `≈$0.12` в `prompt.footer.status` с диалогом по клику;
-- не использует сеть: все данные берутся из локального каталога моделей.
+- показывает в правой панели лимиты подписки OpenCode Go: 5-часовое окно,
+  неделю и месяц;
+- стоимость считает полностью локально; сеть используется только для
+  обновления лимитов Go через OpenCode Console, и только когда панель видима.
 
 Это **оценка по прайс-листу каталога**, а не счёт провайдера. Скидки,
 округления на стороне OpenCode Go и изменения цен могут дать другую сумму.
 
+## Правая панель: лимиты Go
+
+В боковой панели сессии (слот `sidebar.content`) плагин рисует карточку
+подписки OpenCode Go:
+
+```
+OpenCode Go                              ↻
+5-hour window   1% used   Resets in 3h 14m
+█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+Weekly         49% used   Resets in 4h 10m
+██████████████████░░░░░░░░░░░░░░░░░░
+Monthly        32% used   Resets in 22d 16h
+██████████████░░░░░░░░░░░░░░░░░░░░░░
+```
+
+Данные берутся из `context.data.location.usage.limits(location)` — того же
+кэша, который читает встроенный диалог Usage, — поэтому отдельный запрос к
+Console не нужен. Плагин обновляет данные при открытии панели, после
+завершения хода и по клику на заголовок; обратный отсчёт пересчитывается
+локально каждые 30 секунд.
+
+Цвет полосы берётся из темы: акцентный цвет до 74 %, `warning` с 75 %,
+`error` с 90 % или когда `limited === true`. `feedback.success` специально не
+используется — в некоторых темах (например, `orng`) он синий. Если вход в
+OpenCode Console не выполнен или у workspace нет тарифа Go, панель скрыта.
+`BAR_WIDTH = 36` рассчитан на боковую панель шириной 42 колонки.
+
 ## Требования
 
-- OpenCode **V2**, проверено на **2.2.5**.
+- OpenCode **V2**, проверено на **2.2.6** (API лимитов Go — experimental).
 - Node.js **18+** — только для запуска юнит-тестов (OpenCode уже включает
   Node.js).
 - Сборка не нужна: TUI-часть (`tui.tsx`) компилирует сам OpenCode.
@@ -59,13 +89,15 @@ GoCost_OCV2/
 ├── install.bat            # установка в глобальный каталог OpenCode (Windows)
 ├── plugin/
 │   ├── index.js           # серверная заглушка (чтобы пакет был корректным)
-│   ├── tui.tsx            # TUI-плагин: ставит подмену session.cost
+│   ├── tui.tsx            # TUI-плагин: лимиты Go в сайдбаре + подмена session.cost
 │   ├── patch.js           # подмена общего метода стоимости (без OpenCode)
 │   ├── cost.js            # чистая логика расчёта (тестируется отдельно)
+│   ├── usage.js           # чистая логика панели лимитов (тестируется отдельно)
 │   └── package.json       # "type": "module", exports ".", "./tui"
 ├── tmp/
 │   ├── test-cost.mjs      # юнит-тест логики: node tmp/test-cost.mjs
-│   └── test-patch.mjs     # юнит-тест подмены: node tmp/test-patch.mjs
+│   ├── test-patch.mjs     # юнит-тест подмены: node tmp/test-patch.mjs
+│   └── test-usage.mjs     # юнит-тест панели лимитов: node tmp/test-usage.mjs
 ├── README.md
 ├── CHANGES.md             # история изменений
 ├── AGENTS.md              # описание архитектуры проекта
@@ -153,7 +185,7 @@ https://github.com/StandarterDF/GoCost_OCV2 (замени URL на свой фо
    - Linux/macOS: ~/.config/opencode  (или $XDG_CONFIG_HOME/opencode)
    Каталог глобальных плагинов — <config>/plugins/.
 2. Установи плагин: скопируй файлы из папки plugin/ репозитория
-   (index.js, cost.js, patch.js, tui.tsx, package.json) в
+   (index.js, cost.js, patch.js, usage.js, tui.tsx, package.json) в
    <config>/plugins/go-cost/.
    Каталог plugins/<имя> подхватывается автоматически; править cli.json
    и opencode.json не нужно.
@@ -178,7 +210,7 @@ https://github.com/StandarterDF/GoCost_OCV2 (замени URL на свой фо
 install.bat
 ```
 
-Скрипт скопирует `index.js`, `cost.js`, `patch.js`, `tui.tsx` и
+Скрипт скопирует `index.js`, `cost.js`, `patch.js`, `usage.js`, `tui.tsx` и
 `package.json` в `%USERPROFILE%\.config\opencode\plugins\go-cost\`. Если задан
 `XDG_CONFIG_HOME`, используется
 `<XDG_CONFIG_HOME>\opencode\plugins\go-cost\`.
@@ -187,7 +219,7 @@ install.bat
 
 ```bash
 mkdir -p ~/.config/opencode/plugins/go-cost
-cp plugin/index.js plugin/cost.js plugin/patch.js plugin/tui.tsx plugin/package.json \
+cp plugin/index.js plugin/cost.js plugin/patch.js plugin/usage.js plugin/tui.tsx plugin/package.json \
   ~/.config/opencode/plugins/go-cost/
 ```
 
@@ -225,11 +257,12 @@ Fallback (только если объект данных заморожен и 
 
 ## Проверка
 
-Автономные тесты (без OpenCode). Должны пройти оба файла:
+Автономные тесты (без OpenCode). Должны пройти все три файла:
 
 ```bash
 node tmp/test-cost.mjs
 node tmp/test-patch.mjs
+node tmp/test-usage.mjs
 ```
 
 Ожидаемый вывод `test-cost.mjs`:
@@ -260,11 +293,18 @@ ok: failures inside the override never throw
 all tests passed
 ```
 
+Ожидаемый вывод `test-usage.mjs`:
+
+```
+usage.js: ok
+```
+
 Синтаксическая проверка чистых модулей:
 
 ```bash
 node --check plugin/cost.js
 node --check plugin/patch.js
+node --check plugin/usage.js
 node --check plugin/index.js
 ```
 
@@ -274,9 +314,12 @@ node --check plugin/index.js
    должна стоять на месте встроенной: `470.3K (48%) · $0.17`, без `≈`.
 2. Сверь сумму с ручным расчётом по формуле выше и ценам каталога.
 3. Открой боковую панель Context — «spent» должен показывать ту же сумму.
-4. Переключись на модель другого провайдера — должна вернуться нативная
+4. В правой панели должен появиться блок `OpenCode Go` с тремя лимитами,
+   процентами и обратным отсчётом. Проценты должны совпадать с Console
+   (Activity → Overview).
+5. Переключись на модель другого провайдера — должна вернуться нативная
    стоимость (или не показываться ничего, если её нет).
-5. Для сессии с уже положительным `session.cost` значение не меняется.
+6. Для сессии с уже положительным `session.cost` значение не меняется.
 
 Проверка ошибок загрузки:
 

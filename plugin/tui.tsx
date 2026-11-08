@@ -21,14 +21,34 @@
 // behaviour: an `≈$0.12` badge appended to `prompt.footer.status` with a
 // clickable Russian breakdown.
 //
-// No network access is used; prices come from the local model catalog.
+// The same plugin adds the OpenCode Go allowance to the right sidebar:
+//
+//   OpenCode Go                              ↻
+//   5-hour window   1% used     Resets in 3h 14m
+//   █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//   Weekly         49% used     Resets in 4h 10m
+//   ██████████████████░░░░░░░░░░░░░░░░░░
+//   Monthly        32% used     Resets in 22d 16h
+//   ████████████░░░░░░░░░░░░░░░░░░░░░░░░
+//
+// The values come from `context.data.location.usage.limits(location)`, the
+// same cached API the built-in Usage dialog reads. Click the header to refresh
+// it; the countdown ticks locally every 30 seconds.
+//
+// Prices come from the local model catalog. Only the allowance refresh uses
+// the OpenCode Console API, and only when the panel is visible.
 
 import { Plugin } from "@opencode/plugin/tui"
-import { Show, createMemo } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { estimateSessionCost, formatCost, pickCostTier } from "./cost.js"
 import { installCostOverride } from "./patch.js"
+import { BAR_WIDTH, barFill, meterPercent, meterTone, resetLabel, usageRows } from "./usage.js"
 
 const TITLE = "OpenCode Go: стоимость сессии"
+const PANEL_TITLE = "OpenCode Go"
+const CLOCK_MS = 30_000
+const FILLED = "█"
+const TRACK = "░"
 
 const INTEGER = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 })
 
@@ -126,10 +146,141 @@ function GoCost(props) {
   )
 }
 
+function toneColor(theme, meter) {
+  const tone = meterTone(meter)
+  if (tone === "error") return theme.text.feedback.error.base
+  if (tone === "warning") return theme.text.feedback.warning.base
+  // The healthy state must use the theme accent, not feedback.success:
+  // several themes (including `orng`) intentionally map success to blue.
+  return (
+    theme.text.action?.primary?.$selected ??
+    theme.hue?.interactive?.["200"] ??
+    theme.text.base
+  )
+}
+
+// Right-sidebar panel with the OpenCode Go allowance. Hidden when the runtime
+// has no usage API, the location is not signed in (limits() === null), or the
+// workspace has no Go allowance (go === undefined).
+function GoUsage(props) {
+  const context = props.context
+  const theme = context.theme
+  const [now, setNow] = createSignal(Date.now())
+
+  // Local clock: reset countdowns must move even when the cached limits do not.
+  const timer = setInterval(() => setNow(Date.now()), CLOCK_MS)
+  onCleanup(() => clearInterval(timer))
+
+  const location = createMemo(() => {
+    const session = context.data.session.get(props.sessionID)
+    return session?.location ?? context.data.location.default()
+  })
+
+  const info = createMemo(() => {
+    const target = location()
+    const usage = context.data.location.usage
+    if (!target || !usage) return undefined
+    try {
+      return usage.limits(target)
+    } catch {
+      return undefined
+    }
+  })
+
+  // `invalidate()` clears the cached value for a tick, which would otherwise
+  // make the whole panel blink on every refresh. Keep the last known payload;
+  // a real `null` (signed out) still clears it.
+  const [lastInfo, setLastInfo] = createSignal(undefined)
+  createEffect(() => {
+    const value = info()
+    if (value !== undefined) setLastInfo(value ?? null)
+  })
+
+  const rows = createMemo(() => usageRows(lastInfo()))
+
+  const load = (fresh) => {
+    const target = location()
+    const usage = context.data.location.usage
+    if (!target || !usage) return
+    try {
+      if (fresh) usage.invalidate(target)
+    } catch {
+      // A read-only data layer is not fatal: `limits()` may already be warm.
+    }
+    try {
+      const pending = usage.sync(target)
+      if (pending && typeof pending.catch === "function") pending.catch(() => undefined)
+    } catch {
+      // The panel keeps showing the cached values.
+    }
+  }
+
+  // Same trigger as the built-in Usage dialog: refresh after a turn finishes.
+  const stop = context.data.on?.("session.execution.succeeded", (event) => {
+    if (event?.data?.sessionID === props.sessionID) load(true)
+  })
+  onCleanup(() => {
+    if (typeof stop === "function") stop()
+  })
+
+  onMount(() => load(true))
+
+  return (
+    <Show when={rows().length > 0}>
+      <box flexDirection="column" gap={1}>
+        <box flexDirection="row" gap={1} minWidth={0} onMouseUp={() => load(true)}>
+          <text fg={theme.text.base} wrapMode="none">
+            <b>{PANEL_TITLE}</b>
+          </text>
+          <box flexGrow={1} />
+          <text fg={theme.text.muted} wrapMode="none">
+            ↻
+          </text>
+        </box>
+        <For each={rows()}>
+          {(row) => {
+            const percent = () => meterPercent(row.meter)
+            const filled = () => barFill(row.meter, BAR_WIDTH)
+            const empty = () => Math.max(0, BAR_WIDTH - filled())
+            const tone = () => toneColor(theme, row.meter)
+            return (
+              <box flexDirection="column" minWidth={0}>
+                <box flexDirection="row" gap={1} minWidth={0}>
+                  <text fg={theme.text.base} wrapMode="none" truncate flexShrink={1} minWidth={0}>
+                    <b>{row.label}</b>
+                  </text>
+                  <text fg={tone()} wrapMode="none" flexShrink={0}>
+                    <b>{`${percent()}% used`}</b>
+                  </text>
+                  <box flexGrow={1} />
+                  <text fg={theme.text.muted} wrapMode="none" flexShrink={0}>
+                    {resetLabel(row.meter?.resetsAt, now())}
+                  </text>
+                </box>
+                <text wrapMode="none">
+                  <span style={{ fg: tone() }}>{FILLED.repeat(filled())}</span>
+                  <span style={{ fg: theme.text.muted }}>{TRACK.repeat(empty())}</span>
+                </text>
+              </box>
+            )
+          }}
+        </For>
+      </box>
+    </Show>
+  )
+}
+
 export default Plugin.define({
   id: "opencode.go-cost",
 
   setup(context) {
+    // The allowance panel is independent of the cost patch: it is registered
+    // first, so it also works when `session.cost` cannot be overridden.
+    context.ui.slot({
+      append: "sidebar.content",
+      render: (input) => <GoUsage context={context} sessionID={input.sessionID} />,
+    })
+
     // Normal path: patch the method the built-in footer and sidebar already
     // call. Nothing is registered, so the cost keeps its original position and
     // USD formatting. The returned function is the plugin cleanup and puts the

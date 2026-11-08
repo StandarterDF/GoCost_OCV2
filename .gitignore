@@ -1,6 +1,8 @@
 # Локальные артефакты
 tmp/*
 !tmp/test-cost.mjs
+!tmp/test-patch.mjs
+!tmp/test-usage.mjs
 
 # Node
 node_modules/
