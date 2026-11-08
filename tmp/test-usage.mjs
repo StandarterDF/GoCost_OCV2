@@ -77,13 +77,14 @@ assert.deepEqual(
 assert.deepEqual(usageRows({}), [])
 assert.deepEqual(usageRows(null), [])
 
-// Collapsed heading summary.
+// Collapsed heading summary: monthly wins over the highest weekly value.
 assert.equal(usageSummary([]), "")
 assert.equal(usageSummary(null), "")
 assert.equal(
   usageSummary(usageRows({ go: { rolling: { percent: 1 }, weekly: { percent: 49 }, monthly: { percent: 32 } } })),
-  "max 49%",
+  "monthly 32%",
 )
-assert.equal(usageSummary(usageRows({ go: { rolling: { percent: 91 } } })), "max 91%")
+assert.equal(usageSummary(usageRows({ go: { rolling: { percent: 1 }, weekly: { percent: 91 } } })), "")
+assert.equal(usageSummary(usageRows({ go: { monthly: { percent: 91 } } })), "monthly 91%")
 
 console.log("usage.js: ok")

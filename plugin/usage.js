@@ -91,9 +91,12 @@ export function resetLabel(resetsAt, now = Date.now()) {
   return `Resets in ${value}`
 }
 
-// Compact summary shown in the heading while the panel is collapsed.
+// Compact summary shown in the heading while the panel is collapsed. The
+// monthly allowance is the plan-wide number, so it is preferred over the
+// currently highest window (which is often weekly).
 export function usageSummary(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return ""
-  const max = Math.max(...rows.map((row) => meterPercent(row.meter)))
-  return `max ${max}%`
+  if (!Array.isArray(rows)) return ""
+  const monthly = rows.find((row) => row.key === "monthly")
+  if (!monthly) return ""
+  return `monthly ${meterPercent(monthly.meter)}%`
 }
