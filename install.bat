@@ -24,7 +24,7 @@ if not exist "%SRC%\tui.tsx" (
 
 if not exist "%DST%" mkdir "%DST%"
 
-for %%F in (index.js cost.js patch.js usage.js tui.tsx package.json) do (
+for %%F in (index.js cost.js history.js patch.js usage.js tui.tsx package.json) do (
   if exist "%SRC%\%%F" xcopy "%SRC%\%%F" "%DST%\" /Y >nul
 )
 

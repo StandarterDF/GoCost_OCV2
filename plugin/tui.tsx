@@ -12,10 +12,11 @@
 //
 //   470.3K (48%) · $0.17
 //
-// The override lives in `patch.js`: it keeps the native value when it is
-// positive and otherwise sums estimates for the session and its subagent
-// family. The amount is computed from the session token counters and the model
-// catalog prices (`cost.js`).
+// The override lives in `patch.js`: it keeps native costs for non-Go sessions
+// and otherwise sums the message history for the session and its subagent
+// family. Every assistant message is priced with the model and context tier
+// recorded on that message (`cost.js`), so switching models cannot reprice the
+// whole conversation.
 //
 // If the data layer is not writable, `setup` falls back to the previous
 // behaviour: an `≈$0.12` badge appended to `prompt.footer.status` with a
@@ -40,26 +41,37 @@
 
 import { Plugin } from "@opencode/plugin/tui"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
-import { estimateSessionCost, formatCost, pickCostTier } from "./cost.js"
+import { estimateSessionCost, formatCost, sumEstimatedCosts } from "./cost.js"
+import { loadAllMessages, mergeMessages } from "./history.js"
 import { installCostOverride } from "./patch.js"
 import { BAR_WIDTH, barFill, meterPercent, meterTone, resetLabel, usageRows, usageSummary } from "./usage.js"
 
 const TITLE = "OpenCode Go: стоимость сессии"
 const PANEL_TITLE = "OpenCode Go"
 const CLOCK_MS = 30_000
+const RETRY_MS = 5_000
+const MAX_RETRIES = 3
 const FILLED = "█"
 const TRACK = "░"
 
 const INTEGER = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 })
 
 function formatInteger(value) {
-  const number = Number(value)
-  return Number.isFinite(number) ? INTEGER.format(number) : "0"
+  try {
+    const number = Number(value)
+    return Number.isFinite(number) ? INTEGER.format(number) : "0"
+  } catch {
+    return "0"
+  }
 }
 
 function formatPrice(value) {
-  const number = Number(value)
-  return Number.isFinite(number) ? String(number) : "0"
+  try {
+    const number = Number(value)
+    return Number.isFinite(number) ? String(number) : "0"
+  } catch {
+    return "0"
+  }
 }
 
 function tierLabel(tier) {
@@ -69,31 +81,60 @@ function tierLabel(tier) {
   return `контекстный: > ${formatInteger(size)} токенов`
 }
 
-function detailsMessage(session, model, amount) {
-  const tokens = session.tokens ?? {}
-  const tier = pickCostTier(model.cost, tokens)
-  const price = tier ?? {}
-  const modelID = model.id ?? model.modelID ?? "?"
-
-  const lines = [
-    `Модель: ${model.providerID}/${modelID}`,
-    "",
-    "Токены сессии:",
-    `  вход: ${formatInteger(tokens.input)}`,
-    `  выход: ${formatInteger(tokens.output)}`,
-    `  reasoning: ${formatInteger(tokens.reasoning)}`,
-    `  кэш, чтение: ${formatInteger(tokens.cache?.read)}`,
-    `  кэш, запись: ${formatInteger(tokens.cache?.write)}`,
-    "",
-    `Тариф: ${tierLabel(tier)}`,
-    `Цены за 1M токенов: вход $${formatPrice(price.input)}, выход $${formatPrice(price.output)}, ` +
-      `кэш чтение $${formatPrice(price.cache?.read)}, кэш запись $${formatPrice(price.cache?.write)}`,
-    `Оценка: ≈${formatCost(amount)} (${amount.toFixed(6)} USD)`,
-    "",
-    "OpenCode Go сообщает нулевую стоимость сессии, поэтому сумма посчитана",
-    "по каталогу модели. Это оценка, а не счёт провайдера: скидки, округления",
-    "и изменения цен могут дать другую итоговую сумму.",
+function tokenLines(tokens, indent = "  ") {
+  return [
+    `${indent}вход: ${formatInteger(tokens?.input)}`,
+    `${indent}выход: ${formatInteger(tokens?.output)}`,
+    `${indent}reasoning: ${formatInteger(tokens?.reasoning)}`,
+    `${indent}кэш, чтение: ${formatInteger(tokens?.cache?.read)}`,
+    `${indent}кэш, запись: ${formatInteger(tokens?.cache?.write)}`,
   ]
+}
+
+function detailsMessage(session, estimate) {
+  const tokens = estimate.tokens ?? session?.tokens ?? {}
+  const lines = ["Стоимость по сообщениям:", ""]
+
+  for (const row of estimate.breakdown ?? []) {
+    const model = row.model ?? {}
+    const modelID = model.id ?? model.modelID ?? "?"
+    const price = row.tier ?? {}
+    lines.push(
+      `Модель: ${model.providerID ?? "?"}/${modelID}${model.variant ? `:${model.variant}` : ""}`,
+      `  Сообщений: ${formatInteger(row.messages)}`,
+      `  Источник: ${row.source === "reported" ? "стоимость OpenCode" : "оценка по каталогу"}`,
+      ...tokenLines(row.tokens, "    "),
+    )
+    if (row.source === "estimated") {
+      lines.push(
+        `    Тариф: ${tierLabel(row.tier)}`,
+        `    Цены за 1M токенов: вход $${formatPrice(price.input)}, выход $${formatPrice(price.output)}, ` +
+          `кэш чтение $${formatPrice(price.cache?.read)}, кэш запись $${formatPrice(price.cache?.write)}`,
+      )
+    }
+    lines.push(`  Сумма: ≈${formatCost(row.amount)} (${row.amount.toFixed(6)} USD)`, "")
+  }
+
+  lines.push(
+    `Всего сообщений: ${formatInteger(estimate.messageCount)}`,
+    "Токены всех сообщений:",
+    ...tokenLines(tokens),
+    "",
+  )
+  if (estimate.reported > 0) {
+    lines.push(`Стоимость OpenCode: ${formatCost(estimate.reported)} (${estimate.reported.toFixed(6)} USD)`)
+  }
+  if (estimate.estimated > 0) {
+    lines.push(`Оценка по каталогу: ≈${formatCost(estimate.estimated)} (${estimate.estimated.toFixed(6)} USD)`)
+  }
+  lines.push(
+    `Итого: ≈${formatCost(estimate.amount)} (${estimate.amount.toFixed(6)} USD)`,
+    "",
+    "Каждое сообщение посчитано по своей модели и размеру контекста.",
+    "В fallback-метке показана только оценка Go: нативная стоимость OpenCode",
+    "уже выведена отдельно. Это оценка по каталогу, а не счёт провайдера:",
+    "скидки, округления и изменения цен могут дать другую итоговую сумму.",
+  )
 
   return lines.join("\n")
 }
@@ -103,7 +144,7 @@ function showDetails(context, session, estimate) {
   try {
     const pending = context.ui.dialog.alert({
       title: TITLE,
-      message: detailsMessage(session, estimate.model, estimate.amount),
+      message: detailsMessage(session, estimate),
     })
     if (pending && typeof pending.catch === "function") pending.catch(() => undefined)
   } catch {
@@ -111,33 +152,221 @@ function showDetails(context, session, estimate) {
   }
 }
 
+// The shared TUI message cache is paginated (newest 20 records initially).
+// Keep a plugin-owned full history, fetched through the public client API, and
+// merge the reactive cache into it so live token/cost updates still win.
+function createHistoryReader(context) {
+  const [version, setVersion] = createSignal(0)
+  const cache = new Map()
+  const pending = new Set()
+  const attempts = new Map()
+  const retryTimers = new Map()
+  let disposed = false
+  const canLoadAll = typeof context.client?.message?.list === "function"
+
+  const liveMessages = (sessionID) => {
+    const api = context.data.session.message
+    if (typeof api?.list !== "function") return undefined
+    try {
+      const messages = api.list(sessionID)
+      return Array.isArray(messages) ? messages : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  const load = async (sessionID) => {
+    if (
+      !canLoadAll ||
+      pending.has(sessionID) ||
+      retryTimers.has(sessionID) ||
+      (attempts.get(sessionID) ?? 0) > MAX_RETRIES
+    ) {
+      return
+    }
+    pending.add(sessionID)
+    try {
+      const messages = await loadAllMessages(context.client, sessionID)
+      if (disposed) return
+      cache.set(sessionID, mergeMessages(messages, liveMessages(sessionID)))
+      attempts.delete(sessionID)
+      // `read()` tracks this signal inside the built-in footer computation.
+      setVersion((value) => value + 1)
+    } catch {
+      // Retry transient failures with a delay. A signal update is required so a
+      // static session renders again; the attempt cap avoids endless failing
+      // requests for deleted/inaccessible sessions.
+      const attempt = (attempts.get(sessionID) ?? 0) + 1
+      attempts.set(sessionID, attempt)
+      if (!disposed && attempt <= MAX_RETRIES) {
+        const timer = setTimeout(() => {
+          retryTimers.delete(sessionID)
+          setVersion((value) => value + 1)
+        }, RETRY_MS)
+        retryTimers.set(sessionID, timer)
+      }
+    } finally {
+      pending.delete(sessionID)
+    }
+  }
+
+  const read = (session, messages) => {
+    version()
+    const sessionID = session?.id
+    if (typeof sessionID !== "string" || sessionID.length === 0) return messages
+
+    const live = Array.isArray(messages) ? messages : liveMessages(sessionID)
+    const full = cache.get(sessionID)
+    if (full) {
+      const merged = mergeMessages(full, live)
+      cache.set(sessionID, merged)
+      return merged
+    }
+
+    void load(sessionID)
+    // A newest-page cache is not a valid session total. When full pagination is
+    // available, wait for it instead of displaying a confident partial amount.
+    return canLoadAll ? [] : live
+  }
+
+  const ready = (sessionID) =>
+    typeof sessionID !== "string" || sessionID.length === 0 || !canLoadAll || cache.has(sessionID)
+
+  const dispose = () => {
+    disposed = true
+    for (const timer of retryTimers.values()) clearTimeout(timer)
+    retryTimers.clear()
+  }
+
+  return { read, ready, canLoadAll, dispose }
+}
+
 // Fallback badge, used only when `context.data.session.cost` cannot be patched.
 function GoCost(props) {
   const context = props.context
   const theme = context.theme
+  const history = props.history
 
   const session = createMemo(() => context.data.session.get(props.sessionID))
-
-  // Read the catalog for the session's location reactively: switching models
-  // or locations must update the badge without a restart.
-  const models = createMemo(() => {
+  const familyIDs = createMemo(() => {
     const current = session()
-    if (!current?.location) return []
-    return context.data.location.model.list(current.location) ?? []
+    if (!current) return []
+    if (current.parentID) return [props.sessionID]
+
+    let family = []
+    if (typeof context.data.session.family === "function") {
+      try {
+        const listed = context.data.session.family(props.sessionID)
+        if (Array.isArray(listed)) family = listed
+      } catch {
+        family = []
+      }
+    }
+    return [...new Set([props.sessionID, ...family])]
   })
 
-  const estimate = createMemo(() => estimateSessionCost(session(), models()))
+  // If the public full-history client is unavailable, initialize empty shared
+  // caches through the data layer. Non-empty caches are never re-synced because
+  // sync would replace older pages with only the newest one.
+  const requested = new Set()
+  const syncAttempts = new Map()
+  const retryTimers = new Map()
+  const [retryVersion, setRetryVersion] = createSignal(0)
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+    for (const timer of retryTimers.values()) clearTimeout(timer)
+    retryTimers.clear()
+  })
 
-  // Guarded accessor: even if the badge is evaluated for one tick after the
-  // estimate disappears, it renders an empty string instead of throwing.
+  const retrySync = (id) => {
+    if (disposed) return
+    const attempt = (syncAttempts.get(id) ?? 0) + 1
+    syncAttempts.set(id, attempt)
+    if (attempt > MAX_RETRIES || retryTimers.has(id)) return
+    const timer = setTimeout(() => {
+      retryTimers.delete(id)
+      setRetryVersion((value) => value + 1)
+    }, RETRY_MS)
+    retryTimers.set(id, timer)
+  }
+
+  createEffect(() => {
+    retryVersion()
+    if (history.canLoadAll) return
+    for (const id of familyIDs()) {
+      if (requested.has(id) || retryTimers.has(id)) continue
+      const api = context.data.session.message
+      if (typeof api?.sync !== "function" || typeof api?.list !== "function") continue
+      try {
+        const cached = api.list(id)
+        if (Array.isArray(cached) && cached.length > 0) {
+          syncAttempts.delete(id)
+          continue
+        }
+        requested.add(id)
+        const pending = api.sync(id)
+        if (pending && typeof pending.then === "function") {
+          pending
+            .then(() => syncAttempts.delete(id))
+            .catch(() => {
+              requested.delete(id)
+              retrySync(id)
+            })
+        } else {
+          syncAttempts.delete(id)
+        }
+      } catch {
+        requested.delete(id)
+        retrySync(id)
+      }
+    }
+  })
+
+  const estimates = createMemo(() =>
+    familyIDs().map((id) => {
+      const item = context.data.session.get(id)
+      if (!item) return { ready: !history.canLoadAll }
+
+      const location = item.location ?? context.data.location.default?.()
+      let models = []
+      if (location) {
+        try {
+          models = context.data.location.model.list(location) ?? []
+        } catch {
+          models = []
+        }
+      }
+
+      let cached
+      try {
+        cached = context.data.session.message?.list?.(id)
+      } catch {
+        cached = undefined
+      }
+      const ready = history.ready(id)
+      const messages = history.read(item, cached)
+      return { ready, estimate: estimateSessionCost(item, models, messages) }
+    }),
+  )
+
+  // OpenCode still renders its native family cost in the built-in footer. The
+  // fallback badge therefore shows only the missing Go catalog estimate, and
+  // only once every family member's full history is available.
+  const visible = createMemo(() => {
+    const entries = estimates()
+    if (entries.some((entry) => !entry.ready)) return undefined
+    return sumEstimatedCosts(entries.map((entry) => entry.estimate))
+  })
+
   const label = createMemo(() => {
-    const value = estimate()
+    const value = visible()
     return value === undefined ? "" : `≈${formatCost(value.amount)}`
   })
 
   return (
-    <Show when={estimate() !== undefined}>
-      <box flexShrink={0} onMouseDown={() => showDetails(context, session(), estimate())}>
+    <Show when={visible()}>
+      <box flexShrink={0} onMouseDown={() => showDetails(context, session(), visible())}>
         <text fg={theme.text.base} wrapMode="none">
           <b>{label()}</b>
         </text>
@@ -299,23 +528,49 @@ export default Plugin.define({
   setup(context) {
     // The allowance panel is independent of the cost patch: it is registered
     // first, so it also works when `session.cost` cannot be overridden.
-    context.ui.slot({
+    const unregisterUsage = context.ui.slot({
       append: "sidebar.content",
       render: (input) => <GoUsage context={context} sessionID={input.sessionID} />,
     })
+
+    // The shared cache contains only the newest page. Fetch complete histories
+    // through the public client and merge live cache updates into them.
+    const history = createHistoryReader(context)
+    const estimate = (item, models, messages) => {
+      const ready = history.ready(item?.id)
+      const result = estimateSessionCost(item, models, history.read(item, messages))
+      if (!ready) {
+        return { amount: 0, hasGo: false, reported: 0, estimated: 0, ready: false }
+      }
+      return result ? { ...result, ready: true } : { ready: true }
+    }
 
     // Normal path: patch the method the built-in footer and sidebar already
     // call. Nothing is registered, so the cost keeps its original position and
     // USD formatting. The returned function is the plugin cleanup and puts the
     // native method back.
-    const restore = installCostOverride(context.data, estimateSessionCost)
-    if (typeof restore === "function") return restore
+    const restore = installCostOverride(context.data, estimate, {
+      syncMessages: !history.canLoadAll,
+      canLoadFullHistory: history.canLoadAll,
+    })
+    if (typeof restore === "function") {
+      return () => {
+        history.dispose()
+        restore()
+        if (typeof unregisterUsage === "function") unregisterUsage()
+      }
+    }
 
     // Fallback: the shared data layer is frozen or the API changed, so the
     // built-in footer cannot be fed a value. Append the old badge instead.
-    context.ui.slot({
+    const unregisterCost = context.ui.slot({
       append: "prompt.footer.status",
-      render: (input) => <GoCost context={context} sessionID={input.sessionID} />,
+      render: (input) => <GoCost context={context} history={history} sessionID={input.sessionID} />,
     })
+    return () => {
+      history.dispose()
+      if (typeof unregisterCost === "function") unregisterCost()
+      if (typeof unregisterUsage === "function") unregisterUsage()
+    }
   },
 })

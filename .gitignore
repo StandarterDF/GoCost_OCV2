@@ -1,6 +1,7 @@
 # Локальные артефакты
 tmp/*
 !tmp/test-cost.mjs
+!tmp/test-history.mjs
 !tmp/test-patch.mjs
 !tmp/test-usage.mjs
 
